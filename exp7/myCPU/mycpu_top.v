@@ -113,8 +113,6 @@ wire [31:0] alu_src1   ;
 wire [31:0] alu_src2   ;
 wire [31:0] alu_result ;
 
-wire [31:0] mem_result;
-wire [31:0] final_result;
 
 assign seq_pc       = pc + 32'h4;
 assign nextpc       = br_taken ? br_target : seq_pc;
@@ -377,38 +375,47 @@ assign data_sram_we    = {4{ex_mem_mem_we && ex_mem_valid}};
 assign data_sram_addr  = ex_mem_alu_result;
 assign data_sram_wdata = ex_mem_rkd_value;
 
-// --- WB stage (combinational after MEM for now) ---
-assign mem_result   = data_sram_rdata;
-assign final_result = ex_mem_res_from_mem ? mem_result : ex_mem_alu_result;
-
 // =========================================================================
-// Load writeback delay: sync BRAM has 1-cycle read latency.
-//   Cycle N (MEM):  ld.w presents data_sram_addr
-//   Cycle N+1:       data_sram_rdata is valid → write to regfile
+// MEM/WB pipeline register (between MEM and WB)
+//   Note: data_sram_rdata is NOT captured here — like inst_sram_rdata,
+//   BRAM output is already registered. WB uses it directly.
 // =========================================================================
-reg         load_pending;
-reg  [4:0]  load_dest_r;
-reg  [31:0] load_pc_r;
+reg [31:0] mem_wb_alu_result;
+reg [4:0]  mem_wb_dest;
+reg        mem_wb_gr_we;
+reg        mem_wb_res_from_mem;
+reg        mem_wb_valid;
+reg [31:0] mem_wb_pc;
 
 always @(posedge clk) begin
     if (reset) begin
-        load_pending <= 1'b0;
-        load_dest_r  <= 5'd0;
-        load_pc_r    <= 32'd0;
+        mem_wb_valid         <= 1'b0;
+        mem_wb_gr_we         <= 1'b0;
+        mem_wb_res_from_mem  <= 1'b0;
+        mem_wb_alu_result    <= 32'd0;
+        mem_wb_dest          <= 5'd0;
+        mem_wb_pc            <= 32'd0;
     end else begin
-        load_pending <= ex_mem_res_from_mem && ex_mem_valid;
-        load_dest_r  <= ex_mem_dest;
-        if (ex_mem_res_from_mem && ex_mem_valid)
-            load_pc_r <= ex_mem_pc;
+        mem_wb_valid         <= ex_mem_valid;
+        mem_wb_gr_we         <= ex_mem_gr_we;
+        mem_wb_res_from_mem  <= ex_mem_res_from_mem;
+        mem_wb_alu_result    <= ex_mem_alu_result;
+        mem_wb_dest          <= ex_mem_dest;
+        mem_wb_pc            <= ex_mem_pc;
     end
 end
 
-assign rf_we    = load_pending || (ex_mem_gr_we && ex_mem_valid && !ex_mem_res_from_mem);
-assign rf_waddr = load_pending ? load_dest_r : ex_mem_dest;
-assign rf_wdata = load_pending ? data_sram_rdata : ex_mem_alu_result;
+// =========================================================================
+// WB stage — Register File Writeback
+//   data_sram_rdata used directly: BRAM updated it at posedge MEM→WB,
+//   so during WB it holds the data from MEM's address. No load_pending needed.
+// =========================================================================
+assign rf_we    = mem_wb_gr_we && mem_wb_valid;
+assign rf_waddr = mem_wb_dest;
+assign rf_wdata = mem_wb_res_from_mem ? data_sram_rdata : mem_wb_alu_result;
 
 // debug info generate
-assign debug_wb_pc       = load_pending ? load_pc_r : ex_mem_pc;
+assign debug_wb_pc       = mem_wb_pc;
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
