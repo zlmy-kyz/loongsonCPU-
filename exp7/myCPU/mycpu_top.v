@@ -337,25 +337,58 @@ alu u_alu(
     .alu_result (alu_result)
     );
 
-assign data_sram_en    = (id_ex_mem_we || id_ex_res_from_mem) && id_ex_valid;
-assign data_sram_we    = {4{id_ex_mem_we && id_ex_valid}};
-assign data_sram_addr  = alu_result;
-assign data_sram_wdata = id_ex_rkd_value;
+// =========================================================================
+// EX/MEM pipeline register (between EX and MEM)
+// =========================================================================
+reg [31:0] ex_mem_alu_result;
+reg [31:0] ex_mem_rkd_value;     // store data
+reg [4:0]  ex_mem_dest;
+reg        ex_mem_gr_we;
+reg        ex_mem_mem_we;
+reg        ex_mem_res_from_mem;
+reg        ex_mem_valid;
+reg [31:0] ex_mem_pc;
 
+always @(posedge clk) begin
+    if (reset) begin
+        ex_mem_valid        <= 1'b0;
+        ex_mem_gr_we        <= 1'b0;
+        ex_mem_mem_we       <= 1'b0;
+        ex_mem_res_from_mem <= 1'b0;
+        ex_mem_alu_result   <= 32'd0;
+        ex_mem_rkd_value    <= 32'd0;
+        ex_mem_dest         <= 5'd0;
+        ex_mem_pc           <= 32'd0;
+    end else begin
+        ex_mem_valid        <= id_ex_valid;
+        ex_mem_gr_we        <= id_ex_gr_we;
+        ex_mem_mem_we       <= id_ex_mem_we;
+        ex_mem_res_from_mem <= id_ex_res_from_mem;
+        ex_mem_alu_result   <= alu_result;
+        ex_mem_rkd_value    <= id_ex_rkd_value;
+        ex_mem_dest         <= id_ex_dest;
+        ex_mem_pc           <= id_ex_pc;
+    end
+end
+
+// --- MEM stage ---
+assign data_sram_en    = (ex_mem_mem_we || ex_mem_res_from_mem) && ex_mem_valid;
+assign data_sram_we    = {4{ex_mem_mem_we && ex_mem_valid}};
+assign data_sram_addr  = ex_mem_alu_result;
+assign data_sram_wdata = ex_mem_rkd_value;
+
+// --- WB stage (combinational after MEM for now) ---
 assign mem_result   = data_sram_rdata;
-assign final_result = id_ex_res_from_mem ? mem_result : alu_result;
+assign final_result = ex_mem_res_from_mem ? mem_result : ex_mem_alu_result;
 
 // =========================================================================
 // Load writeback delay: sync BRAM has 1-cycle read latency.
-//   Cycle N:   ld.w presents data_sram_addr
-//   Cycle N+1: data_sram_rdata is valid → write to regfile
-// So we defer load writeback by 1 cycle. The instruction after a load
-// (in exp7, a NOP or non-writing inst) executes in parallel; if it also
-// writes, the pending load takes priority (single-cycle limitation).
+//   Cycle N (MEM):  ld.w presents data_sram_addr
+//   Cycle N+1:       data_sram_rdata is valid → write to regfile
 // =========================================================================
 reg         load_pending;
 reg  [4:0]  load_dest_r;
-reg  [31:0] load_pc_r;       // PC of the pending load, for debug trace
+reg  [31:0] load_pc_r;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -363,21 +396,19 @@ always @(posedge clk) begin
         load_dest_r  <= 5'd0;
         load_pc_r    <= 32'd0;
     end else begin
-        load_pending <= id_ex_res_from_mem && id_ex_valid;
-        load_dest_r  <= id_ex_dest;
-        if (id_ex_res_from_mem && id_ex_valid)
-            load_pc_r <= id_ex_pc;
+        load_pending <= ex_mem_res_from_mem && ex_mem_valid;
+        load_dest_r  <= ex_mem_dest;
+        if (ex_mem_res_from_mem && ex_mem_valid)
+            load_pc_r <= ex_mem_pc;
     end
 end
 
-// rf_we:  load_pending (deferred load writeback)  OR
-//         current non-load instruction that writes registers
-assign rf_we    = load_pending || (id_ex_gr_we && id_ex_valid && !id_ex_res_from_mem);
-assign rf_waddr = load_pending ? load_dest_r : id_ex_dest;
-assign rf_wdata = load_pending ? data_sram_rdata : alu_result;
+assign rf_we    = load_pending || (ex_mem_gr_we && ex_mem_valid && !ex_mem_res_from_mem);
+assign rf_waddr = load_pending ? load_dest_r : ex_mem_dest;
+assign rf_wdata = load_pending ? data_sram_rdata : ex_mem_alu_result;
 
 // debug info generate
-assign debug_wb_pc       = load_pending ? load_pc_r : id_ex_pc;
+assign debug_wb_pc       = load_pending ? load_pc_r : ex_mem_pc;
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
