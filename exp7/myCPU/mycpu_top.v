@@ -272,23 +272,78 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (if_id_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
-assign alu_src1 = src1_is_pc  ? if_id_pc[31:0] : rj_value;
-assign alu_src2 = src2_is_imm ? imm : rkd_value;
+// =========================================================================
+// ID/EX pipeline register (between ID and EX)
+// =========================================================================
+reg [11:0] id_ex_alu_op;
+reg        id_ex_src1_is_pc;
+reg        id_ex_src2_is_imm;
+reg        id_ex_res_from_mem;
+reg        id_ex_gr_we;
+reg        id_ex_mem_we;
+reg [4:0]  id_ex_dest;
+reg [31:0] id_ex_pc;
+reg [31:0] id_ex_rj_value;
+reg [31:0] id_ex_rkd_value;
+reg [31:0] id_ex_imm;
+reg [4:0]  id_ex_rj;
+reg [4:0]  id_ex_rkd_src;
+reg        id_ex_valid;
+
+wire [4:0] id_rkd_src;
+assign id_rkd_src = src_reg_is_rd ? rd : rk;
+
+always @(posedge clk) begin
+    if (reset) begin
+        id_ex_valid        <= 1'b0;
+        id_ex_alu_op       <= 12'd0;
+        id_ex_src1_is_pc   <= 1'b0;
+        id_ex_src2_is_imm  <= 1'b0;
+        id_ex_res_from_mem <= 1'b0;
+        id_ex_gr_we        <= 1'b0;
+        id_ex_mem_we       <= 1'b0;
+        id_ex_dest         <= 5'd0;
+        id_ex_pc           <= 32'd0;
+        id_ex_rj_value     <= 32'd0;
+        id_ex_rkd_value    <= 32'd0;
+        id_ex_imm          <= 32'd0;
+        id_ex_rj           <= 5'd0;
+        id_ex_rkd_src      <= 5'd0;
+    end else begin
+        id_ex_valid        <= valid && if_id_valid;
+        id_ex_alu_op       <= alu_op;
+        id_ex_src1_is_pc   <= src1_is_pc;
+        id_ex_src2_is_imm  <= src2_is_imm;
+        id_ex_res_from_mem <= res_from_mem;
+        id_ex_gr_we        <= gr_we;
+        id_ex_mem_we       <= mem_we;
+        id_ex_dest         <= dest;
+        id_ex_pc           <= if_id_pc;
+        id_ex_rj_value     <= rj_value;
+        id_ex_rkd_value    <= rkd_value;
+        id_ex_imm          <= imm;
+        id_ex_rj           <= rj;
+        id_ex_rkd_src      <= id_rkd_src;
+    end
+end
+
+assign alu_src1 = id_ex_src1_is_pc  ? id_ex_pc[31:0] : id_ex_rj_value;
+assign alu_src2 = id_ex_src2_is_imm ? id_ex_imm : id_ex_rkd_value;
 
 alu u_alu(
-    .alu_op     (alu_op    ),
+    .alu_op     (id_ex_alu_op),
     .alu_src1   (alu_src1  ),
     .alu_src2   (alu_src2  ),
     .alu_result (alu_result)
     );
 
-assign data_sram_en    = (mem_we || res_from_mem) && valid;
-assign data_sram_we    = {4{mem_we && valid}};
+assign data_sram_en    = (id_ex_mem_we || id_ex_res_from_mem) && id_ex_valid;
+assign data_sram_we    = {4{id_ex_mem_we && id_ex_valid}};
 assign data_sram_addr  = alu_result;
-assign data_sram_wdata = rkd_value;
+assign data_sram_wdata = id_ex_rkd_value;
 
 assign mem_result   = data_sram_rdata;
-assign final_result = res_from_mem ? mem_result : alu_result;
+assign final_result = id_ex_res_from_mem ? mem_result : alu_result;
 
 // =========================================================================
 // Load writeback delay: sync BRAM has 1-cycle read latency.
@@ -308,21 +363,21 @@ always @(posedge clk) begin
         load_dest_r  <= 5'd0;
         load_pc_r    <= 32'd0;
     end else begin
-        load_pending <= res_from_mem && valid;
-        load_dest_r  <= dest;
-        if (res_from_mem && valid)
-            load_pc_r <= if_id_pc;
+        load_pending <= id_ex_res_from_mem && id_ex_valid;
+        load_dest_r  <= id_ex_dest;
+        if (id_ex_res_from_mem && id_ex_valid)
+            load_pc_r <= id_ex_pc;
     end
 end
 
 // rf_we:  load_pending (deferred load writeback)  OR
 //         current non-load instruction that writes registers
-assign rf_we    = load_pending || (gr_we && valid && !res_from_mem);
-assign rf_waddr = load_pending ? load_dest_r : dest;
+assign rf_we    = load_pending || (id_ex_gr_we && id_ex_valid && !id_ex_res_from_mem);
+assign rf_waddr = load_pending ? load_dest_r : id_ex_dest;
 assign rf_wdata = load_pending ? data_sram_rdata : alu_result;
 
 // debug info generate
-assign debug_wb_pc       = load_pending ? load_pc_r : if_id_pc;
+assign debug_wb_pc       = load_pending ? load_pc_r : id_ex_pc;
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
