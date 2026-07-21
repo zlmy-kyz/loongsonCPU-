@@ -38,7 +38,7 @@ wire        br_taken;
 wire [31:0] br_target;
 wire [31:0] inst;
 reg  [31:0] pc;
-reg  [31:0] fetch_pc;   // delayed pc to align with synchronous BRAM read latency
+// IF/ID pipeline registers declared below at line 139
 
 wire [11:0] alu_op;
 wire        load_op;
@@ -122,11 +122,9 @@ assign nextpc       = br_taken ? br_target : seq_pc;
 always @(posedge clk) begin
     if (reset) begin
         pc       <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset
-        fetch_pc <= 32'h1bfffffc;
     end
     else begin
         pc       <= nextpc;
-        fetch_pc <= pc;               // fetch_pc lags pc by 1 cycle, matching BRAM read latency
     end
 end
 
@@ -134,7 +132,29 @@ assign inst_sram_en    = 1'b1;
 assign inst_sram_we    = 4'b0;
 assign inst_sram_addr  = pc;
 assign inst_sram_wdata = 32'b0;
-assign inst            = inst_sram_rdata;
+
+// =========================================================================
+// IF/ID pipeline register
+//   BRAM has 1-cycle read latency. if_id_pc delays pc by 1 cycle to align
+//   with inst_sram_rdata. if_id_valid gates invalid instructions.
+// =========================================================================
+reg [31:0] if_id_pc;       // PC of the instruction entering ID stage
+reg        if_id_valid;     // 1 = valid, 0 = bubble (NOP)
+
+always @(posedge clk) begin
+    if (reset) begin
+        if_id_pc    <= 32'h1bfffffc;
+        if_id_valid <= 1'b0;
+    end
+    else begin
+        if_id_pc    <= pc;          // pc[N-1], matches BRAM output timing
+        if_id_valid <= 1'b1;
+    end
+end
+
+// ID stage sees gated instruction (bubble → 0 → NOP)
+assign inst = if_id_valid ? inst_sram_rdata : 32'd0;
+
 
 assign op_31_26  = inst[31:26];
 assign op_25_22  = inst[25:22];
@@ -249,10 +269,10 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_bl
                    || inst_b
                   ) && valid;
-assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (fetch_pc + br_offs) :
+assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (if_id_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
-assign alu_src1 = src1_is_pc  ? fetch_pc[31:0] : rj_value;
+assign alu_src1 = src1_is_pc  ? if_id_pc[31:0] : rj_value;
 assign alu_src2 = src2_is_imm ? imm : rkd_value;
 
 alu u_alu(
@@ -291,7 +311,7 @@ always @(posedge clk) begin
         load_pending <= res_from_mem && valid;
         load_dest_r  <= dest;
         if (res_from_mem && valid)
-            load_pc_r <= fetch_pc;
+            load_pc_r <= if_id_pc;
     end
 end
 
@@ -302,7 +322,7 @@ assign rf_waddr = load_pending ? load_dest_r : dest;
 assign rf_wdata = load_pending ? data_sram_rdata : alu_result;
 
 // debug info generate
-assign debug_wb_pc       = load_pending ? load_pc_r : fetch_pc;
+assign debug_wb_pc       = load_pending ? load_pc_r : if_id_pc;
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
