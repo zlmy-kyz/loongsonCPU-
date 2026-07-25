@@ -174,3 +174,5 @@ assign inst = if_id_valid ? (id_stall_r ? stall_inst : inst_sram_rdata) : 32'd0;
 2. ALU 指令间的数据前递 —— 解决普通 RAW 冒险
 3. Load-Use 停顿 + WB→EX 转发 —— 解决访存导致的 RAW 冒险
 4. Stall 期间指令保持 —— 处理 BRAM 同步读的时序特性
+
+exp8用的是阻塞,exp9用的是前递,我在exp8全部做完了
