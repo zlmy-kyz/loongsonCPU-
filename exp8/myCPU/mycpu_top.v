@@ -127,6 +127,9 @@ always @(posedge clk) begin
     if (reset) begin
         pc       <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset
     end
+    else if (id_stall) begin
+        pc       <= pc;               // hold PC during load-use stall
+    end
     else begin
         pc       <= nextpc;
     end
@@ -150,6 +153,9 @@ always @(posedge clk) begin
         if_id_pc    <= 32'h1bfffffc;
         if_id_valid <= 1'b0;
     end
+    else if (id_stall) begin
+        // hold current values
+    end
     else if (id_flush) begin
         if_id_pc    <= 32'd0;       // bubble, PC invalid
         if_id_valid <= 1'b0;        // kill the instruction after branch
@@ -160,8 +166,23 @@ always @(posedge clk) begin
     end
 end
 
-// ID stage sees gated instruction (bubble → 0 → NOP)
-assign inst = if_id_valid ? inst_sram_rdata : 32'd0;
+// Stall instruction hold: inst_sram_rdata is naturally aligned with if_id_pc
+// during the cycle, but shifts to the next instruction during stall. Capture
+// it on the first stall posedge and hold for subsequent stall cycles.
+reg [31:0] stall_inst;
+reg        id_stall_r;     // id_stall delayed by 1 cycle
+
+always @(posedge clk) begin
+    id_stall_r <= id_stall;
+    if (id_stall && !id_stall_r)
+        stall_inst <= inst_sram_rdata;  // first stall posedge: capture aligned value
+    // else: hold during ongoing stall; normal cycles don't use stall_inst
+end
+
+// ID stage sees captured instruction
+//   Normal: inst_sram_rdata (wire, naturally aligned with if_id_pc)
+//   Stall:  stall_inst (holds the instruction from before the stall)
+assign inst = if_id_valid ? (id_stall_r ? stall_inst : inst_sram_rdata) : 32'd0;
 
 
 assign op_31_26  = inst[31:26];
@@ -275,19 +296,21 @@ wire [4:0] id_rkd_src;
 assign id_rkd_src = src_reg_is_rd ? rd : rk;
 
 // forwarded values (pick newest source)
-assign rj_value = id_ex_gr_we      && (id_ex_dest == rj)
+// ID forwarding: skip loads in EX/MEM (alu_result = address, not data)
+//   mem_wb is safe: rf_wdata already selects between alu_result and data_sram_rdata
+assign rj_value = id_ex_gr_we  && !id_ex_res_from_mem && (id_ex_dest == rj)
                   ? alu_result :
-                  ex_mem_gr_we     && (ex_mem_dest == rj)
+                  ex_mem_gr_we && !ex_mem_res_from_mem && (ex_mem_dest == rj)
                   ? ex_mem_alu_result :
-                  mem_wb_gr_we     && (mem_wb_dest == rj)
+                  mem_wb_gr_we && (mem_wb_dest == rj)
                   ? rf_wdata :
                   rf_rdata1;
 
-assign rkd_value = id_ex_gr_we      && (id_ex_dest == id_rkd_src)
+assign rkd_value = id_ex_gr_we  && !id_ex_res_from_mem && (id_ex_dest == id_rkd_src)
                    ? alu_result :
-                   ex_mem_gr_we     && (ex_mem_dest == id_rkd_src)
+                   ex_mem_gr_we && !ex_mem_res_from_mem && (ex_mem_dest == id_rkd_src)
                    ? ex_mem_alu_result :
-                   mem_wb_gr_we     && (mem_wb_dest == id_rkd_src)
+                   mem_wb_gr_we && (mem_wb_dest == id_rkd_src)
                    ? rf_wdata :
                    rf_rdata2;
 
@@ -305,6 +328,24 @@ assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (if_id_pc + br_
 wire id_flush;
 assign id_flush = br_taken;
 
+// Load-use hazard detection: two separate signals
+//   load_use_stall : load in EX, dependent in ID → stall pipeline
+//   load_use_fwd   : load in MEM, dependent in ID → no stall, forwarding instead
+wire load_use_stall;
+assign load_use_stall = id_ex_res_from_mem && id_ex_valid &&
+                        (id_ex_dest == rj || id_ex_dest == id_rkd_src);
+
+wire load_use_fwd;
+assign load_use_fwd = ex_mem_res_from_mem && ex_mem_valid &&
+                      (ex_mem_dest == rj || ex_mem_dest == id_rkd_src);
+
+// combined: either case triggers WB→EX forwarding in the next cycle
+wire load_use;
+assign load_use = load_use_stall || load_use_fwd;
+
+wire id_stall;
+assign id_stall = load_use_stall;
+
 // =========================================================================
 // ID/EX pipeline register (between ID and EX)
 // =========================================================================
@@ -321,6 +362,7 @@ reg [31:0] id_ex_rkd_value;
 reg [31:0] id_ex_imm;
 reg [4:0]  id_ex_rj;
 reg [4:0]  id_ex_rkd_src;
+reg        id_ex_load_use;   // WB→EX forwarding enable
 reg        id_ex_valid;
 
 always @(posedge clk) begin
@@ -339,6 +381,24 @@ always @(posedge clk) begin
         id_ex_imm          <= 32'd0;
         id_ex_rj           <= 5'd0;
         id_ex_rkd_src      <= 5'd0;
+        id_ex_load_use     <= 1'b0;
+    end else if (id_stall) begin
+        // insert bubble (NOP)
+        id_ex_valid        <= 1'b0;
+        id_ex_alu_op       <= 12'd0;
+        id_ex_src1_is_pc   <= 1'b0;
+        id_ex_src2_is_imm  <= 1'b0;
+        id_ex_res_from_mem <= 1'b0;
+        id_ex_gr_we        <= 1'b0;
+        id_ex_mem_we       <= 1'b0;
+        id_ex_dest         <= 5'd0;
+        id_ex_pc           <= 32'd0;
+        id_ex_rj_value     <= 32'd0;
+        id_ex_rkd_value    <= 32'd0;
+        id_ex_imm          <= 32'd0;
+        id_ex_rj           <= 5'd0;
+        id_ex_rkd_src      <= 5'd0;
+        id_ex_load_use     <= 1'b0;
     end else begin
         id_ex_valid        <= valid && if_id_valid;
         id_ex_alu_op       <= alu_op;
@@ -354,11 +414,20 @@ always @(posedge clk) begin
         id_ex_imm          <= imm;
         id_ex_rj           <= rj;
         id_ex_rkd_src      <= id_rkd_src;
+        id_ex_load_use     <= load_use;
     end
 end
 
-assign alu_src1 = id_ex_src1_is_pc  ? id_ex_pc[31:0] : id_ex_rj_value;
-assign alu_src2 = id_ex_src2_is_imm ? id_ex_imm : id_ex_rkd_value;
+// WB→EX forwarding: load-use detected in ID, load now in WB → bypass data_sram_rdata
+assign alu_src1 = id_ex_src1_is_pc  ? id_ex_pc[31:0] :
+                  (id_ex_load_use && mem_wb_res_from_mem && mem_wb_valid && mem_wb_dest == id_ex_rj)
+                  ? data_sram_rdata :
+                  id_ex_rj_value;
+
+assign alu_src2 = id_ex_src2_is_imm ? id_ex_imm :
+                  (id_ex_load_use && mem_wb_res_from_mem && mem_wb_valid && mem_wb_dest == id_ex_rkd_src)
+                  ? data_sram_rdata :
+                  id_ex_rkd_value;
 
 alu u_alu(
     .alu_op     (id_ex_alu_op),
@@ -453,9 +522,9 @@ assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
 
 // extra debug
-assign debug_ex_alu_src1     = alu_src1;
-assign debug_ex_pc           = id_ex_pc;
-assign debug_id_rj_value     = rj_value;
-assign debug_ex_alu_src1_raw = id_ex_rj_value;
+assign debug_ex_alu_src1     = if_id_pc;
+assign debug_ex_pc           = id_stall;
+assign debug_id_rj_value     = inst_sram_rdata;
+assign debug_ex_alu_src1_raw = pc;
 
 endmodule
