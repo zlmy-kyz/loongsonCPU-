@@ -104,6 +104,9 @@ wire        inst_sltui;
 wire        inst_andi;
 wire        inst_ori;
 wire        inst_xori;
+wire        inst_sll_w;
+wire        inst_sra_w;
+wire        inst_srl_w;
 
 wire        need_ui5;
 wire        need_si12;
@@ -237,6 +240,9 @@ assign inst_sltui  = op_31_26_d[6'h00] & op_25_22_d[4'h9];
 assign inst_andi   = op_31_26_d[6'h00] & op_25_22_d[4'hd];
 assign inst_ori    = op_31_26_d[6'h00] & op_25_22_d[4'he];
 assign inst_xori   = op_31_26_d[6'h00] & op_25_22_d[4'hf];
+assign inst_sll_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0e];
+assign inst_sra_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
+assign inst_srl_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl | inst_pcaddu12i;
@@ -247,9 +253,9 @@ assign alu_op[ 4] = inst_and | inst_andi;
 assign alu_op[ 5] = inst_nor;
 assign alu_op[ 6] = inst_or | inst_ori;
 assign alu_op[ 7] = inst_xor | inst_xori;
-assign alu_op[ 8] = inst_slli_w;
-assign alu_op[ 9] = inst_srli_w;
-assign alu_op[10] = inst_srai_w;
+assign alu_op[ 8] = inst_slli_w | inst_sll_w;
+assign alu_op[ 9] = inst_srli_w | inst_srl_w;
+assign alu_op[10] = inst_srai_w | inst_sra_w;
 assign alu_op[11] = inst_lu12i_w;
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
