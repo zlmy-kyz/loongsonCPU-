@@ -99,6 +99,8 @@ wire        inst_beq;
 wire        inst_bne;
 wire        inst_lu12i_w;
 wire        inst_pcaddu12i;
+wire        inst_slti;
+wire        inst_sltui;
 
 wire        need_ui5;
 wire        need_si12;
@@ -226,12 +228,14 @@ assign inst_beq    = op_31_26_d[6'h16];
 assign inst_bne    = op_31_26_d[6'h17];
 assign inst_lu12i_w = op_31_26_d[6'h05] & ~inst[25];
 assign inst_pcaddu12i = op_31_26_d[6'h07] & ~inst[25];
+assign inst_slti   = op_31_26_d[6'h00] & op_25_22_d[4'h8];
+assign inst_sltui  = op_31_26_d[6'h00] & op_25_22_d[4'h9];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl | inst_pcaddu12i;
 assign alu_op[ 1] = inst_sub_w;
-assign alu_op[ 2] = inst_slt;
-assign alu_op[ 3] = inst_sltu;
+assign alu_op[ 2] = inst_slt | inst_slti;
+assign alu_op[ 3] = inst_sltu | inst_sltui;
 assign alu_op[ 4] = inst_and;
 assign alu_op[ 5] = inst_nor;
 assign alu_op[ 6] = inst_or;
@@ -270,7 +274,9 @@ assign src2_is_imm   = inst_slli_w |
                        inst_lu12i_w|
                        inst_jirl   |
                        inst_bl     |
-                       inst_pcaddu12i;
+                       inst_pcaddu12i|
+                       inst_slti   |
+                       inst_sltui  ;
 
 assign res_from_mem  = inst_ld_w;
 assign dst_is_r1     = inst_bl;
