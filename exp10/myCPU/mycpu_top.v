@@ -45,7 +45,7 @@ wire [31:0] inst;
 reg  [31:0] pc;
 // IF/ID pipeline registers declared below at line 139
 
-wire [11:0] alu_op;
+wire [18:0] alu_op;
 wire        load_op;
 wire        src1_is_pc;
 wire        src2_is_imm;
@@ -107,6 +107,13 @@ wire        inst_xori;
 wire        inst_sll_w;
 wire        inst_sra_w;
 wire        inst_srl_w;
+wire        inst_mul_w;
+wire        inst_mulh_w;
+wire        inst_mulh_wu;
+wire        inst_div_w;
+wire        inst_mod_w;
+wire        inst_div_wu;
+wire        inst_mod_wu;
 
 wire        need_ui5;
 wire        need_si12;
@@ -127,6 +134,7 @@ wire [31:0] rf_wdata;
 wire [31:0] alu_src1   ;
 wire [31:0] alu_src2   ;
 wire [31:0] alu_result ;
+wire [31:0] mul_div_result;
 wire        rj_eq_rd   ;
 
 
@@ -243,6 +251,13 @@ assign inst_xori   = op_31_26_d[6'h00] & op_25_22_d[4'hf];
 assign inst_sll_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0e];
 assign inst_sra_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
 assign inst_srl_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
+assign inst_mul_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h18];
+assign inst_mulh_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h19];
+assign inst_mulh_wu = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h1a];
+assign inst_div_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h00];
+assign inst_mod_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
+assign inst_div_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
+assign inst_mod_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl | inst_pcaddu12i;
@@ -257,6 +272,13 @@ assign alu_op[ 8] = inst_slli_w | inst_sll_w;
 assign alu_op[ 9] = inst_srli_w | inst_srl_w;
 assign alu_op[10] = inst_srai_w | inst_sra_w;
 assign alu_op[11] = inst_lu12i_w;
+assign alu_op[12] = inst_mul_w;
+assign alu_op[13] = inst_mulh_w;
+assign alu_op[14] = inst_mulh_wu;
+assign alu_op[15] = inst_div_w;
+assign alu_op[16] = inst_mod_w;
+assign alu_op[17] = inst_div_wu;
+assign alu_op[18] = inst_mod_wu;
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
 assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w;
@@ -325,8 +347,24 @@ assign id_rkd_src = src_reg_is_rd ? rd : rk;
 // forwarded values (pick newest source)
 // ID forwarding: skip loads in EX/MEM (alu_result = address, not data)
 //   mem_wb is safe: rf_wdata already selects between alu_result and data_sram_rdata
+/*assign rj_value = id_ex_gr_we  && !id_ex_res_from_mem && !div_busy && (id_ex_dest == rj)
+                  ? ex_result :
+                  ex_mem_gr_we && !ex_mem_res_from_mem && (ex_mem_dest == rj)
+                  ? ex_mem_alu_result :
+                  mem_wb_gr_we && (mem_wb_dest == rj)
+                  ? rf_wdata :
+                  rf_rdata1;
+
+assign rkd_value = id_ex_gr_we  && !id_ex_res_from_mem && !div_busy && (id_ex_dest == id_rkd_src)
+                   ? ex_result :
+                   ex_mem_gr_we && !ex_mem_res_from_mem && (ex_mem_dest == id_rkd_src)
+                   ? ex_mem_alu_result :
+                   mem_wb_gr_we && (mem_wb_dest == id_rkd_src)
+                   ? rf_wdata :
+                   rf_rdata2;*/
+
 assign rj_value = id_ex_gr_we  && !id_ex_res_from_mem && (id_ex_dest == rj)
-                  ? alu_result :
+                  ? ex_result :
                   ex_mem_gr_we && !ex_mem_res_from_mem && (ex_mem_dest == rj)
                   ? ex_mem_alu_result :
                   mem_wb_gr_we && (mem_wb_dest == rj)
@@ -334,7 +372,7 @@ assign rj_value = id_ex_gr_we  && !id_ex_res_from_mem && (id_ex_dest == rj)
                   rf_rdata1;
 
 assign rkd_value = id_ex_gr_we  && !id_ex_res_from_mem && (id_ex_dest == id_rkd_src)
-                   ? alu_result :
+                   ? ex_result :
                    ex_mem_gr_we && !ex_mem_res_from_mem && (ex_mem_dest == id_rkd_src)
                    ? ex_mem_alu_result :
                    mem_wb_gr_we && (mem_wb_dest == id_rkd_src)
@@ -370,13 +408,16 @@ assign load_use_fwd = ex_mem_res_from_mem && ex_mem_valid &&
 wire load_use;
 assign load_use = load_use_stall || load_use_fwd;
 
+//wire div_busy;
+
 wire id_stall;
+//assign id_stall = load_use_stall || div_busy;
 assign id_stall = load_use_stall;
 
 // =========================================================================
 // ID/EX pipeline register (between ID and EX)
 // =========================================================================
-reg [11:0] id_ex_alu_op;
+reg [18:0] id_ex_alu_op;
 reg        id_ex_src1_is_pc;
 reg        id_ex_src2_is_imm;
 reg        id_ex_res_from_mem;
@@ -395,7 +436,7 @@ reg        id_ex_valid;
 always @(posedge clk) begin
     if (reset) begin
         id_ex_valid        <= 1'b0;
-        id_ex_alu_op       <= 12'd0;
+        id_ex_alu_op       <= 19'd0;
         id_ex_src1_is_pc   <= 1'b0;
         id_ex_src2_is_imm  <= 1'b0;
         id_ex_res_from_mem <= 1'b0;
@@ -410,9 +451,8 @@ always @(posedge clk) begin
         id_ex_rkd_src      <= 5'd0;
         id_ex_load_use     <= 1'b0;
     end else if (id_stall) begin
-        // insert bubble (NOP)
         id_ex_valid        <= 1'b0;
-        id_ex_alu_op       <= 12'd0;
+        id_ex_alu_op       <= 19'd0;
         id_ex_src1_is_pc   <= 1'b0;
         id_ex_src2_is_imm  <= 1'b0;
         id_ex_res_from_mem <= 1'b0;
@@ -445,6 +485,39 @@ always @(posedge clk) begin
     end
 end
 
+// mul/div control in EX stage
+/*wire        ex_is_mul;
+wire        ex_is_div;
+wire [1:0]  ex_mul_op;
+wire [1:0]  ex_div_op;
+
+assign ex_is_mul = |id_ex_alu_op[14:12];
+assign ex_is_div = |id_ex_alu_op[18:15];
+
+assign ex_mul_op = id_ex_alu_op[14] ? 2'b10 :      // mulh.wu
+                   id_ex_alu_op[13] ? 2'b01 :       // mulh.w
+                   2'b00;                            // mul.w
+
+assign ex_div_op = id_ex_alu_op[18] ? 2'b11 :       // mod.wu
+                   id_ex_alu_op[17] ? 2'b10 :        // div.wu
+                   id_ex_alu_op[16] ? 2'b01 :        // mod.w
+                   2'b00;                             // div.w
+
+wire div_valid;
+assign div_valid = id_ex_valid && ex_is_div;*/
+
+wire [2:0] ex_mul_div_op;
+assign ex_mul_div_op = id_ex_alu_op[12] ? 3'b000 :      // mul.w
+                       id_ex_alu_op[13] ? 3'b001 :       // mulh.w
+                       id_ex_alu_op[14] ? 3'b010 :       // mulh.wu
+                       id_ex_alu_op[15] ? 3'b011 :       // div.w
+                       id_ex_alu_op[16] ? 3'b100 :       // mod.w
+                       id_ex_alu_op[17] ? 3'b101 :       // div.wu
+                       id_ex_alu_op[18] ? 3'b110 :       // mod.wu
+                       3'b000;                            // default
+wire ex_is_mul_div;
+assign ex_is_mul_div = |id_ex_alu_op[18:12];
+
 // WB→EX forwarding: load-use detected in ID, load now in WB → bypass data_sram_rdata
 assign alu_src1 = id_ex_src1_is_pc  ? id_ex_pc[31:0] :
                   (id_ex_load_use && mem_wb_res_from_mem && mem_wb_valid && mem_wb_dest == id_ex_rj)
@@ -457,11 +530,36 @@ assign alu_src2 = id_ex_src2_is_imm ? id_ex_imm :
                   id_ex_rkd_value;
 
 alu u_alu(
-    .alu_op     (id_ex_alu_op),
+    .alu_op     (id_ex_alu_op[11:0]),
     .alu_src1   (alu_src1  ),
     .alu_src2   (alu_src2  ),
     .alu_result (alu_result)
     );
+
+wire [31:0] mul_result;
+mul_unit u_mul(
+    .src1   (alu_src1),
+    .src2   (alu_src2),
+    .op     (ex_mul_div_op),
+    .result (mul_div_result)
+);
+
+/*wire [31:0] div_result;
+div_unit u_div(
+    .clk    (clk),
+    .rst    (reset),
+    .valid  (div_valid),
+    .src1   (alu_src1),
+    .src2   (alu_src2),
+    .op     (ex_div_op),
+    .result (div_result),
+    .busy   (div_busy)
+);*/
+
+// EX result mux: mul/div bypass ALU
+wire [31:0] ex_result;
+assign ex_result = ex_is_mul_div ? mul_div_result :
+                   alu_result;
 
 // =========================================================================
 // EX/MEM pipeline register (between EX and MEM)
@@ -490,7 +588,7 @@ always @(posedge clk) begin
         ex_mem_gr_we        <= id_ex_gr_we;
         ex_mem_mem_we       <= id_ex_mem_we;
         ex_mem_res_from_mem <= id_ex_res_from_mem;
-        ex_mem_alu_result   <= alu_result;
+        ex_mem_alu_result   <= ex_result;
         ex_mem_rkd_value    <= id_ex_rkd_value;
         ex_mem_dest         <= id_ex_dest;
         ex_mem_pc           <= id_ex_pc;
@@ -549,9 +647,9 @@ assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
 
 // extra debug
-assign debug_ex_alu_src1     = if_id_pc;
-assign debug_ex_pc           = id_stall;
-assign debug_id_rj_value     = inst_sram_rdata;
-assign debug_ex_alu_src1_raw = pc;
+assign debug_ex_alu_src1     = mul_div_result;
+assign debug_ex_pc           = alu_src1;
+assign debug_id_rj_value     = alu_src2;
+assign debug_ex_alu_src1_raw = ex_mul_div_op;
 
 endmodule
