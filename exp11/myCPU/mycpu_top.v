@@ -54,6 +54,8 @@ wire        dst_is_r1;
 wire        gr_we;
 wire        mem_we;
 wire        src_reg_is_rd;
+wire [1: 0] mem_size;       // 00=word, 01=byte, 10=half
+wire        mem_sign;       // 1=signed (ld.b/ld.h), 0=unsigned (ld.bu/ld.hu)
 wire [4: 0] dest;
 wire [31:0] rj_value;
 wire [31:0] rkd_value;
@@ -91,6 +93,10 @@ wire        inst_srli_w;
 wire        inst_srai_w;
 wire        inst_addi_w;
 wire        inst_ld_w;
+wire        inst_ld_b;
+wire        inst_ld_h;
+wire        inst_ld_bu;
+wire        inst_ld_hu;
 wire        inst_st_w;
 wire        inst_jirl;
 wire        inst_b;
@@ -239,6 +245,10 @@ assign inst_srli_w = op_31_26_d[6'h00] & op_25_22_d[4'h1] & op_21_20_d[2'h0] & o
 assign inst_srai_w = op_31_26_d[6'h00] & op_25_22_d[4'h1] & op_21_20_d[2'h0] & op_19_15_d[5'h11];
 assign inst_addi_w = op_31_26_d[6'h00] & op_25_22_d[4'ha];
 assign inst_ld_w   = op_31_26_d[6'h0a] & op_25_22_d[4'h2];
+assign inst_ld_b   = op_31_26_d[6'h0a] & op_25_22_d[4'h0];
+assign inst_ld_h   = op_31_26_d[6'h0a] & op_25_22_d[4'h1];
+assign inst_ld_bu  = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
+assign inst_ld_hu  = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
 assign inst_st_w   = op_31_26_d[6'h0a] & op_25_22_d[4'h6];
 assign inst_jirl   = op_31_26_d[6'h13];
 assign inst_b      = op_31_26_d[6'h14];
@@ -268,7 +278,8 @@ assign inst_div_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & 
 assign inst_mod_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
-                    | inst_jirl | inst_bl | inst_pcaddu12i;
+                    | inst_jirl | inst_bl | inst_pcaddu12i
+                    | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
 assign alu_op[ 1] = inst_sub_w;
 assign alu_op[ 2] = inst_slt | inst_slti;
 assign alu_op[ 3] = inst_sltu | inst_sltui;
@@ -289,7 +300,8 @@ assign alu_op[17] = inst_div_wu;
 assign alu_op[18] = inst_mod_wu;
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
-assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w;
+assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w
+                     | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
 assign need_si16  =  inst_jirl | inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
 assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_ui12  =  inst_andi | inst_ori | inst_xori;
@@ -324,10 +336,18 @@ assign src2_is_imm   = inst_slli_w |
                        inst_sltui  |
                        inst_andi   |
                        inst_ori    |
-                       inst_xori   ;
+                       inst_xori   |
+                       inst_ld_b   |
+                       inst_ld_h   |
+                       inst_ld_bu  |
+                       inst_ld_hu  ;
 
-assign res_from_mem  = inst_ld_w;
+assign res_from_mem  = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
 assign dst_is_r1     = inst_bl;
+assign mem_size      = (inst_ld_b | inst_ld_bu) ? 2'b01 :
+                       (inst_ld_h | inst_ld_hu) ? 2'b10 :
+                       2'b00;
+assign mem_sign      = (inst_ld_b | inst_ld_h) ? 1'b1 : 1'b0;
 assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
 assign mem_we        = inst_st_w;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
@@ -457,6 +477,8 @@ reg [4:0]  id_ex_rj;
 reg [4:0]  id_ex_rkd_src;
 reg        id_ex_load_use;   // WB→EX forwarding enable
 reg        id_ex_valid;
+reg [1:0]  id_ex_mem_size;
+reg        id_ex_mem_sign;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -475,6 +497,8 @@ always @(posedge clk) begin
         id_ex_rj           <= 5'd0;
         id_ex_rkd_src      <= 5'd0;
         id_ex_load_use     <= 1'b0;
+        id_ex_mem_size     <= 2'd0;
+        id_ex_mem_sign     <= 1'b0;
     end else if (id_stall) begin
         id_ex_valid        <= 1'b0;
         id_ex_alu_op       <= 19'd0;
@@ -491,6 +515,8 @@ always @(posedge clk) begin
         id_ex_rj           <= 5'd0;
         id_ex_rkd_src      <= 5'd0;
         id_ex_load_use     <= 1'b0;
+        id_ex_mem_size     <= 2'd0;
+        id_ex_mem_sign     <= 1'b0;
     end else begin
         id_ex_valid        <= valid && if_id_valid;
         id_ex_alu_op       <= alu_op;
@@ -507,6 +533,8 @@ always @(posedge clk) begin
         id_ex_rj           <= rj;
         id_ex_rkd_src      <= id_rkd_src;
         id_ex_load_use     <= load_use;
+        id_ex_mem_size     <= mem_size;
+        id_ex_mem_sign     <= mem_sign;
     end
 end
 
@@ -597,6 +625,8 @@ reg        ex_mem_mem_we;
 reg        ex_mem_res_from_mem;
 reg        ex_mem_valid;
 reg [31:0] ex_mem_pc;
+reg [1:0]  ex_mem_mem_size;
+reg        ex_mem_mem_sign;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -608,6 +638,8 @@ always @(posedge clk) begin
         ex_mem_rkd_value    <= 32'd0;
         ex_mem_dest         <= 5'd0;
         ex_mem_pc           <= 32'd0;
+        ex_mem_mem_size     <= 2'd0;
+        ex_mem_mem_sign     <= 1'b0;
     end else begin
         ex_mem_valid        <= id_ex_valid;
         ex_mem_gr_we        <= id_ex_gr_we;
@@ -617,6 +649,8 @@ always @(posedge clk) begin
         ex_mem_rkd_value    <= id_ex_rkd_value;
         ex_mem_dest         <= id_ex_dest;
         ex_mem_pc           <= id_ex_pc;
+        ex_mem_mem_size     <= id_ex_mem_size;
+        ex_mem_mem_sign     <= id_ex_mem_sign;
     end
 end
 
@@ -637,6 +671,8 @@ reg        mem_wb_gr_we;
 reg        mem_wb_res_from_mem;
 reg        mem_wb_valid;
 reg [31:0] mem_wb_pc;
+reg [1:0]  mem_wb_mem_size;
+reg        mem_wb_mem_sign;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -646,6 +682,8 @@ always @(posedge clk) begin
         mem_wb_alu_result    <= 32'd0;
         mem_wb_dest          <= 5'd0;
         mem_wb_pc            <= 32'd0;
+        mem_wb_mem_size      <= 2'd0;
+        mem_wb_mem_sign      <= 1'b0;
     end else begin
         mem_wb_valid         <= ex_mem_valid;
         mem_wb_gr_we         <= ex_mem_gr_we;
@@ -653,6 +691,8 @@ always @(posedge clk) begin
         mem_wb_alu_result    <= ex_mem_alu_result;
         mem_wb_dest          <= ex_mem_dest;
         mem_wb_pc            <= ex_mem_pc;
+        mem_wb_mem_size      <= ex_mem_mem_size;
+        mem_wb_mem_sign      <= ex_mem_mem_sign;
     end
 end
 
@@ -663,7 +703,28 @@ end
 // =========================================================================
 assign rf_we    = mem_wb_gr_we && mem_wb_valid;
 assign rf_waddr = mem_wb_dest;
-assign rf_wdata = mem_wb_res_from_mem ? data_sram_rdata : mem_wb_alu_result;
+
+// sub-word load: byte/halfword extraction & sign extension
+wire [7:0]  load_byte;
+wire [15:0] load_half;
+wire [31:0] load_data;
+assign load_byte = (mem_wb_alu_result[1:0] == 2'b00) ? data_sram_rdata[ 7: 0] :
+                   (mem_wb_alu_result[1:0] == 2'b01) ? data_sram_rdata[15: 8] :
+                   (mem_wb_alu_result[1:0] == 2'b10) ? data_sram_rdata[23:16] :
+                                                        data_sram_rdata[31:24];
+assign load_half = mem_wb_alu_result[1] ? data_sram_rdata[31:16]
+                                        : data_sram_rdata[15: 0];
+wire [31:0] load_byte_ext;
+wire [31:0] load_half_ext;
+assign load_byte_ext = mem_wb_mem_sign ? {{24{load_byte[7]}}, load_byte}
+                                       : {24'b0, load_byte};
+assign load_half_ext = mem_wb_mem_sign ? {{16{load_half[15]}}, load_half}
+                                       : {16'b0, load_half};
+assign load_data = (mem_wb_mem_size == 2'b01) ? load_byte_ext :
+                   (mem_wb_mem_size == 2'b10) ? load_half_ext :
+                                                data_sram_rdata;
+
+assign rf_wdata = mem_wb_res_from_mem ? load_data : mem_wb_alu_result;
 
 // debug info generate
 assign debug_wb_pc       = mem_wb_pc;
@@ -672,9 +733,9 @@ assign debug_wb_rf_wnum  = rf_waddr;
 assign debug_wb_rf_wdata = rf_wdata;
 
 // extra debug
-assign debug_ex_alu_src1     = mul_div_result;
+assign debug_ex_alu_src1     = if_id_pc;
 assign debug_ex_pc           = alu_src1;
 assign debug_id_rj_value     = alu_src2;
-assign debug_ex_alu_src1_raw = ex_mul_div_op;
+assign debug_ex_alu_src1_raw = res_from_mem;
 
 endmodule
