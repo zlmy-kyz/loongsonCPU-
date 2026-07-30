@@ -98,6 +98,8 @@ wire        inst_ld_h;
 wire        inst_ld_bu;
 wire        inst_ld_hu;
 wire        inst_st_w;
+wire        inst_st_b;
+wire        inst_st_h;
 wire        inst_jirl;
 wire        inst_b;
 wire        inst_bl;
@@ -250,6 +252,8 @@ assign inst_ld_h   = op_31_26_d[6'h0a] & op_25_22_d[4'h1];
 assign inst_ld_bu  = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
 assign inst_ld_hu  = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
 assign inst_st_w   = op_31_26_d[6'h0a] & op_25_22_d[4'h6];
+assign inst_st_b   = op_31_26_d[6'h0a] & op_25_22_d[4'h4];
+assign inst_st_h   = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
 assign inst_jirl   = op_31_26_d[6'h13];
 assign inst_b      = op_31_26_d[6'h14];
 assign inst_bl     = op_31_26_d[6'h15];
@@ -279,7 +283,8 @@ assign inst_mod_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & 
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl | inst_pcaddu12i
-                    | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+                    | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                    | inst_st_b | inst_st_h;
 assign alu_op[ 1] = inst_sub_w;
 assign alu_op[ 2] = inst_slt | inst_slti;
 assign alu_op[ 3] = inst_sltu | inst_sltui;
@@ -301,7 +306,8 @@ assign alu_op[18] = inst_mod_wu;
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
 assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w
-                     | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+                     | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                     | inst_st_b | inst_st_h;
 assign need_si16  =  inst_jirl | inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
 assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_ui12  =  inst_andi | inst_ori | inst_xori;
@@ -318,7 +324,8 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
-assign src_reg_is_rd = inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_st_w;
+assign src_reg_is_rd = inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                     | inst_st_w | inst_st_b | inst_st_h;
 
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
@@ -340,16 +347,20 @@ assign src2_is_imm   = inst_slli_w |
                        inst_ld_b   |
                        inst_ld_h   |
                        inst_ld_bu  |
-                       inst_ld_hu  ;
+                       inst_ld_hu  |
+                       inst_st_b   |
+                       inst_st_h   ;
 
 assign res_from_mem  = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
 assign dst_is_r1     = inst_bl;
-assign mem_size      = (inst_ld_b | inst_ld_bu) ? 2'b01 :
-                       (inst_ld_h | inst_ld_hu) ? 2'b10 :
+assign mem_size      = (inst_ld_b | inst_ld_bu | inst_st_b) ? 2'b01 :
+                       (inst_ld_h | inst_ld_hu | inst_st_h) ? 2'b10 :
                        2'b00;
 assign mem_sign      = (inst_ld_b | inst_ld_h) ? 1'b1 : 1'b0;
-assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
-assign mem_we        = inst_st_w;
+assign gr_we         = ~inst_st_w & ~inst_st_b & ~inst_st_h
+                     & ~inst_beq & ~inst_bne & ~inst_b
+                     & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
+assign mem_we        = inst_st_w | inst_st_b | inst_st_h;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
 assign rf_raddr1 = rj;
@@ -656,9 +667,26 @@ end
 
 // --- MEM stage ---
 assign data_sram_en    = (ex_mem_mem_we || ex_mem_res_from_mem) && ex_mem_valid;
-assign data_sram_we    = {4{ex_mem_mem_we && ex_mem_valid}};
 assign data_sram_addr  = ex_mem_alu_result;
-assign data_sram_wdata = ex_mem_rkd_value;
+
+// per-byte write enable for sub-word stores
+wire mem_wr;
+assign mem_wr = ex_mem_mem_we && ex_mem_valid;
+wire [3:0] mem_we_byte;
+wire [3:0] mem_we_half;
+assign mem_we_byte = (ex_mem_alu_result[1:0] == 2'b00) ? 4'b0001 :
+                     (ex_mem_alu_result[1:0] == 2'b01) ? 4'b0010 :
+                     (ex_mem_alu_result[1:0] == 2'b10) ? 4'b0100 :
+                                                          4'b1000;
+assign mem_we_half = ex_mem_alu_result[1] ? 4'b1100 : 4'b0011;
+assign data_sram_we = (ex_mem_mem_size == 2'b01) ? (mem_wr ? mem_we_byte : 4'b0000) :
+                      (ex_mem_mem_size == 2'b10) ? (mem_wr ? mem_we_half : 4'b0000) :
+                                                    {4{mem_wr}};
+
+// store data replication for sub-word stores
+assign data_sram_wdata = (ex_mem_mem_size == 2'b01) ? {4{ex_mem_rkd_value[ 7: 0]}} :
+                         (ex_mem_mem_size == 2'b10) ? {2{ex_mem_rkd_value[15: 0]}} :
+                                                       ex_mem_rkd_value;
 
 // =========================================================================
 // MEM/WB pipeline register (between MEM and WB)
