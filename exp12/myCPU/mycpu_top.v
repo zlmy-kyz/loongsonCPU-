@@ -126,6 +126,11 @@ wire        inst_div_w;
 wire        inst_mod_w;
 wire        inst_div_wu;
 wire        inst_mod_wu;
+wire        inst_csrxchg;
+wire        inst_csrwr;
+wire        inst_csrrd;
+wire        inst_ertn;
+wire        inst_syscall;
 
 wire        need_ui5;
 wire        need_si12;
@@ -149,6 +154,33 @@ wire [31:0] alu_result ;
 wire [31:0] mul_div_result;
 wire        rj_eq_rd   ;
 
+// CSR interface
+wire [13:0] csr_raddr1;
+wire [31:0] csr_rdata1;
+wire        csr_we;
+wire [13:0] csr_waddr;
+wire [31:0] csr_wdata;
+// CSR read port 2 (ertn in ID -> ERA; exception in EX -> EENTRY)
+wire [13:0] csr_raddr2;
+wire [31:0] csr_rdata2;
+// ertn jump target: ERA with forwarding from earlier CSR writes to ERA(0x6)
+wire [31:0] ertn_target;
+// CSR read forwarding: ID reads CSR, EX may write the same CSR in this cycle
+wire [31:0] csr_rdata1_fwd;
+// CSR write signals (computed in ID, written to csr.v in EX stage)
+//   declared here because the csr instantiation references them
+reg         id_ex_csr_we;
+reg  [13:0] id_ex_csr_waddr;
+reg  [31:0] id_ex_csr_wdata;
+// current mode (from csr module, for PRMD save on exception)
+wire [31:0] csr_crmd;
+// exception (EX stage)
+wire        ex_exception;
+wire [31:0] ex_crmd_wdata;
+wire [31:0] ex_prmd_wdata;
+wire [31:0] ex_estat_wdata;
+wire [31:0] ex_era_wdata;
+
 
 assign seq_pc       = pc + 32'h4;
 assign nextpc       = br_taken ? br_target : seq_pc;
@@ -156,6 +188,9 @@ assign nextpc       = br_taken ? br_target : seq_pc;
 always @(posedge clk) begin
     if (reset) begin
         pc       <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset
+    end
+    else if (ex_exception) begin
+        pc       <= csr_rdata2;       // exception entry: jump to EENTRY
     end
     else if (id_stall) begin
         pc       <= pc;               // hold PC during load-use stall
@@ -280,6 +315,19 @@ assign inst_div_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & 
 assign inst_mod_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
 assign inst_div_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
 assign inst_mod_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
+assign inst_csrxchg = op_31_26_d[6'h01] & op_25_22_d[4'h0] & (inst[9:5] != 5'd0) & (inst[9:5] != 5'd1);
+
+// csrwr rd, csr_num: 同上, [9:5]=1
+assign inst_csrwr   = op_31_26_d[6'h01] & op_25_22_d[4'h0] & (inst[9:5] == 5'd1);
+
+// ertn: op_31_26=000001(1), op_25_22=1001(9), [14:10]=01110(0xe)
+assign inst_ertn    = op_31_26_d[6'h01] & op_25_22_d[4'h9] & (inst[14:10] == 5'd14);
+
+// csrrd rd, csr_num: 同上, [9:5]=0
+assign inst_csrrd   = op_31_26_d[6'h01] & op_25_22_d[4'h0] & (inst[9:5] == 5'd0);
+
+// syscall code: op_31_26=000000(0), op_25_22=0000(0), [21:15]=1010110, code[14:0]
+assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & (inst[21:15] == 7'b1010110);
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl | inst_pcaddu12i
@@ -295,7 +343,7 @@ assign alu_op[ 7] = inst_xor | inst_xori;
 assign alu_op[ 8] = inst_slli_w | inst_sll_w;
 assign alu_op[ 9] = inst_srli_w | inst_srl_w;
 assign alu_op[10] = inst_srai_w | inst_sra_w;
-assign alu_op[11] = inst_lu12i_w;
+assign alu_op[11] = inst_lu12i_w | inst_csrxchg | inst_csrwr | inst_csrrd;
 assign alu_op[12] = inst_mul_w;
 assign alu_op[13] = inst_mulh_w;
 assign alu_op[14] = inst_mulh_wu;
@@ -317,6 +365,7 @@ assign src2_is_4  =  inst_jirl | inst_bl;
 assign imm = src2_is_4 ? 32'h4                      :
              need_si20 ? {i20[19:0], 12'b0}         :
              need_ui12 ? {20'b0, i12[11:0]}         :
+             (inst_csrxchg | inst_csrwr | inst_csrrd) ? csr_rdata1_fwd :
 /*need_ui5 || need_si12*/{{20{i12[11]}}, i12[11:0]} ;
 
 assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
@@ -325,7 +374,33 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 assign src_reg_is_rd = inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu
-                     | inst_st_w | inst_st_b | inst_st_h;
+                     | inst_st_w | inst_st_b | inst_st_h
+                     | inst_csrxchg
+                     | inst_csrwr;    // csrwr: 写入 CSR 的数据来自 GR[rd]
+
+// csr 读: ertn 读 PRMD(0x1)用于恢复现场; 其余读 csr_num(inst[21:10])
+assign csr_raddr1 = inst_ertn ? 14'h1 : {2'b0, i12};
+
+// csr 写 CSR: ID 段算好最终值, WB 段写入
+//   csrxchg: 新值 = (旧值 & ~掩码) | (GR[rd] & 掩码), 掩码 = rj_value, 数据 = rkd_value
+//   csrwr:   新值 = GR[rd](掩码全 1 的特例), 数据 = rkd_value
+//   ertn:    恢复 CRMD: PLV/IE 从 PRMD, DA/PG 保留
+assign csr_we    = inst_csrxchg | inst_csrwr | inst_ertn;
+assign csr_waddr = inst_ertn ? 14'h0 : {2'b0, i12};
+assign csr_wdata = inst_csrxchg ? ((csr_rdata1_fwd & ~rj_value) | (rkd_value & rj_value)) :
+                   inst_csrwr    ? rkd_value :
+                   inst_ertn     ? {27'b0, csr_crmd[4:3], csr_rdata1_fwd[2:0]} :
+                                   32'b0;
+
+// exception read port 2: EX 异常读 EENTRY(0xc); ertn 在 ID 读 ERA(0x6)
+assign csr_raddr2 = ex_exception ? 14'hc : 14'h6;
+
+// exception processing (EX stage)
+assign ex_exception   = id_ex_ex_syscall && id_ex_valid;
+assign ex_crmd_wdata  = {27'b0, csr_crmd[4:3], 1'b0, 2'b0};  // PLV=0, IE=0, DA/PG 保留
+assign ex_prmd_wdata  = {29'b0, csr_crmd[2:0]};              // 保存旧 PLV/IE
+assign ex_estat_wdata = {9'b0, 6'd11, 16'b0};                // Ecode = SYS(0xb)
+assign ex_era_wdata   = id_ex_pc;                            // syscall 的 PC
 
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
@@ -349,7 +424,10 @@ assign src2_is_imm   = inst_slli_w |
                        inst_ld_bu  |
                        inst_ld_hu  |
                        inst_st_b   |
-                       inst_st_h   ;
+                       inst_st_h   |
+                       inst_csrxchg |
+                       inst_csrwr   |
+                       inst_csrrd;
 
 assign res_from_mem  = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
 assign dst_is_r1     = inst_bl;
@@ -359,7 +437,8 @@ assign mem_size      = (inst_ld_b | inst_ld_bu | inst_st_b) ? 2'b01 :
 assign mem_sign      = (inst_ld_b | inst_ld_h) ? 1'b1 : 1'b0;
 assign gr_we         = ~inst_st_w & ~inst_st_b & ~inst_st_h
                      & ~inst_beq & ~inst_bne & ~inst_b
-                     & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
+                     & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu
+                     & ~inst_syscall & ~inst_ertn;
 assign mem_we        = inst_st_w | inst_st_b | inst_st_h;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
@@ -374,6 +453,26 @@ regfile u_regfile(
     .we     (rf_we    ),
     .waddr  (rf_waddr ),
     .wdata  (rf_wdata )
+    );
+
+wire [31:0] debug_era;
+csr u_csr(
+    .clk             (clk            ),
+    .reset           (reset          ),
+    .raddr1          (csr_raddr1     ),
+    .rdata1          (csr_rdata1     ),
+    .we              (id_ex_csr_we   ),
+    .waddr           (id_ex_csr_waddr),
+    .wdata           (id_ex_csr_wdata),
+    .raddr2          (csr_raddr2     ),
+    .rdata2          (csr_rdata2     ),
+    .crmd_out        (csr_crmd       ),
+    .debug_era       (debug_era),
+    .ex_wen          (ex_exception   ),
+    .ex_crmd_wdata   (ex_crmd_wdata  ),
+    .ex_prmd_wdata   (ex_prmd_wdata  ),
+    .ex_estat_wdata  (ex_estat_wdata ),
+    .ex_era_wdata    (ex_era_wdata   )
     );
 
 // --- ID stage forwarding ---
@@ -441,13 +540,16 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
+                   || inst_ertn
                   ) && valid;
-assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (if_id_pc + br_offs) :
+assign br_target = inst_ertn ? ertn_target :
+                   (inst_beq || inst_bne || inst_blt || inst_bge || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (if_id_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
 // Branch flush: when branch taken in ID, invalidate the instruction in IF/ID
+// Exception flush: when exception in EX, also invalidate IF/ID (and ID/EX, EX/MEM)
 wire id_flush;
-assign id_flush = br_taken;
+assign id_flush = br_taken | ex_exception;
 
 // Load-use hazard detection: two separate signals
 //   load_use_stall : load in EX, dependent in ID → stall pipeline
@@ -464,11 +566,21 @@ assign load_use_fwd = ex_mem_res_from_mem && ex_mem_valid &&
 wire load_use;
 assign load_use = load_use_stall || load_use_fwd;
 
+// Branch load-use: ld in MEM, ID is a branch depending on it.
+//   Branch resolves in ID, so WB->EX forwarding next cycle is too late.
+//   Stall one cycle: ld advances to WB, branch forwards from mem_wb (rf_wdata).
+wire id_is_branch;
+assign id_is_branch = inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
+
+wire load_use_stall_branch;
+assign load_use_stall_branch = ex_mem_res_from_mem && ex_mem_valid && id_is_branch &&
+                               (ex_mem_dest == rj || ex_mem_dest == id_rkd_src);
+
 //wire div_busy;
 
 wire id_stall;
 //assign id_stall = load_use_stall || div_busy;
-assign id_stall = load_use_stall;
+assign id_stall = load_use_stall || load_use_stall_branch;
 
 // =========================================================================
 // ID/EX pipeline register (between ID and EX)
@@ -490,6 +602,7 @@ reg        id_ex_load_use;   // WB→EX forwarding enable
 reg        id_ex_valid;
 reg [1:0]  id_ex_mem_size;
 reg        id_ex_mem_sign;
+reg        id_ex_ex_syscall;   // 1 = syscall in EX stage, triggers exception
 
 always @(posedge clk) begin
     if (reset) begin
@@ -510,7 +623,11 @@ always @(posedge clk) begin
         id_ex_load_use     <= 1'b0;
         id_ex_mem_size     <= 2'd0;
         id_ex_mem_sign     <= 1'b0;
-    end else if (id_stall) begin
+        id_ex_csr_we       <= 1'b0;
+        id_ex_csr_waddr    <= 14'd0;
+        id_ex_csr_wdata    <= 32'd0;
+        id_ex_ex_syscall   <= 1'b0;
+    end else if (id_stall || ex_exception) begin
         id_ex_valid        <= 1'b0;
         id_ex_alu_op       <= 19'd0;
         id_ex_src1_is_pc   <= 1'b0;
@@ -528,6 +645,10 @@ always @(posedge clk) begin
         id_ex_load_use     <= 1'b0;
         id_ex_mem_size     <= 2'd0;
         id_ex_mem_sign     <= 1'b0;
+        id_ex_csr_we       <= 1'b0;
+        id_ex_csr_waddr    <= 14'd0;
+        id_ex_csr_wdata    <= 32'd0;
+        id_ex_ex_syscall   <= 1'b0;
     end else begin
         id_ex_valid        <= valid && if_id_valid;
         id_ex_alu_op       <= alu_op;
@@ -546,6 +667,10 @@ always @(posedge clk) begin
         id_ex_load_use     <= load_use;
         id_ex_mem_size     <= mem_size;
         id_ex_mem_sign     <= mem_sign;
+        id_ex_csr_we       <= csr_we;
+        id_ex_csr_waddr    <= csr_waddr;
+        id_ex_csr_wdata    <= csr_wdata;
+        id_ex_ex_syscall   <= inst_syscall;
     end
 end
 
@@ -641,6 +766,18 @@ reg        ex_mem_mem_sign;
 
 always @(posedge clk) begin
     if (reset) begin
+        ex_mem_valid        <= 1'b0;
+        ex_mem_gr_we        <= 1'b0;
+        ex_mem_mem_we       <= 1'b0;
+        ex_mem_res_from_mem <= 1'b0;
+        ex_mem_alu_result   <= 32'd0;
+        ex_mem_rkd_value    <= 32'd0;
+        ex_mem_dest         <= 5'd0;
+        ex_mem_pc           <= 32'd0;
+        ex_mem_mem_size     <= 2'd0;
+        ex_mem_mem_sign     <= 1'b0;
+    end else if (ex_exception) begin
+        // exception in EX: kill the faulting instruction, nothing reaches MEM/WB
         ex_mem_valid        <= 1'b0;
         ex_mem_gr_we        <= 1'b0;
         ex_mem_mem_we       <= 1'b0;
@@ -754,6 +891,16 @@ assign load_data = (mem_wb_mem_size == 2'b01) ? load_byte_ext :
 
 assign rf_wdata = mem_wb_res_from_mem ? load_data : mem_wb_alu_result;
 
+// ertn jump target: ERA with forwarding from earlier CSR writes to ERA(0x6)
+//   CSR writes happen in EX stage now: only id_ex needs forwarding (older ones already written)
+assign ertn_target = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == 14'h6) ? id_ex_csr_wdata :
+                     csr_rdata2;
+
+// CSR read forwarding: csr instruction in ID reads CSR, csr write in EX targets same CSR
+//   (e.g. csrwr t0,era; csrrd t1,era -- csrrd must see the value being written this cycle)
+assign csr_rdata1_fwd = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == csr_raddr1) ? id_ex_csr_wdata :
+                        csr_rdata1;
+
 // debug info generate
 assign debug_wb_pc       = mem_wb_pc;
 assign debug_wb_rf_we    = {4{rf_we}};
@@ -762,8 +909,8 @@ assign debug_wb_rf_wdata = rf_wdata;
 
 // extra debug
 assign debug_ex_alu_src1     = if_id_pc;
-assign debug_ex_pc           = alu_src1;
-assign debug_id_rj_value     = alu_src2;
-assign debug_ex_alu_src1_raw = res_from_mem;
+assign debug_ex_pc           = rkd_value;
+assign debug_id_rj_value     = csr_rdata1;
+assign debug_ex_alu_src1_raw = debug_era;
 
 endmodule
