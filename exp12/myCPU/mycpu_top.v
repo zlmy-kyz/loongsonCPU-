@@ -455,7 +455,6 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
-wire [31:0] debug_era;
 csr u_csr(
     .clk             (clk            ),
     .reset           (reset          ),
@@ -467,7 +466,6 @@ csr u_csr(
     .raddr2          (csr_raddr2     ),
     .rdata2          (csr_rdata2     ),
     .crmd_out        (csr_crmd       ),
-    .debug_era       (debug_era),
     .ex_wen          (ex_exception   ),
     .ex_crmd_wdata   (ex_crmd_wdata  ),
     .ex_prmd_wdata   (ex_prmd_wdata  ),
@@ -911,6 +909,6 @@ assign debug_wb_rf_wdata = rf_wdata;
 assign debug_ex_alu_src1     = if_id_pc;
 assign debug_ex_pc           = rkd_value;
 assign debug_id_rj_value     = csr_rdata1;
-assign debug_ex_alu_src1_raw = debug_era;
+assign debug_ex_alu_src1_raw = pc;
 
 endmodule
