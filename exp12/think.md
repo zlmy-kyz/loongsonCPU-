@@ -72,3 +72,38 @@ always @(posedge clk) begin
     if (reset) crmd <= 32'h8;   // 复位值: DA=1(直接地址映射), PLV=0, IE=0
     ...
 ```
+
+## bug3: ertn 跳转目标用旧 ERA(CSR 版本的数据冒险)
+
+**出错指令(处理器 ex_finish 返回路径):**
+
+```
+csrrd  r13, 0x6      ; r13 ← 旧 ERA(0x1c05825c, 即 syscall 的地址)
+addi.w r13, r13, 4   ; r13 ← 0x1c058260(+4 跳过 syscall)
+csrwr  r13, 0x6      ; ERA ← r13(0x1c058260); r13 ← 旧 ERA(交换)
+ertn                 ; PC ← ERA(必须跳到 0x1c058260)
+```
+
+**现象:** ertn 在 ID 决议时,csrwr(写 ERA)还在流水线里,era 寄存器仍是旧值 0x1c05825c——ertn 会跳回 syscall 本身,死循环。
+
+```
+         IF      ID      EX      MEM     WB
+  1      csrrd
+  2      addi    csrrd
+  3      csrwr   addi    csrrd
+  4      ertn    csrwr   addi    csrrd    ← ertn 读 era = 旧值,csrwr 的写在 WB 才落账
+  5      xxx     ertn    csrwr   addi    csrrd
+```
+
+**根因:** 程序顺序上 csrwr 先写 ERA、ertn 后读 ERA,但 csrwr 的写在 WB 才落账,ertn 在 ID 读到旧值。这是 CSR 版的 RAW 冒险——之前只给通用寄存器做了前递,没给 CSR 做。
+
+**解决:** ertn 的跳转目标检查流水线中写 ERA(0x6)的指令,优先用它的写数据:
+
+```verilog
+// CSR 写移到 EX 后,只需前递 EX 一级;更早的写已落账
+assign ertn_target = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == 14'h6) ? id_ex_csr_wdata :
+                     csr_rdata2;
+assign br_target = inst_ertn ? ertn_target : ...;
+```
+
+**关键:** 只要"写目标"是寄存器(GR 或 CSR),紧邻的"读"就需要前递。CSR 是全局状态,同样适用——之前只给 GR 做了前递,漏了 CSR。
