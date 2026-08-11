@@ -50,3 +50,25 @@ xxx beq nop nop ld   ← ld 到 WB,转发 ✓
 
 **关键:** 分支决议在 ID,不能像 ALU 一样等 EX 旁路,必须阻塞到 ld 到 WB。
 
+## bug2: CRMD 复位值错误
+
+**现象:** n47 第一条 `csrxchg t0, t1, csr_crmd` 写回 GR[t0] 的值与 golden_trace 不符——仿真读到 CRMD 旧值 = 0,而 golden_trace 显示 0x8。
+
+**根因:** csr.v 里所有 CSR 复位写成了全 0,但规范规定 CRMD 复位时 **DA=1**:
+
+> CSR.CRMD 的 PLV=0, IE=0, **DA=1**, PG=0, DATF=0, DATM=0
+
+即复位后 CRMD = 0x8。DA(直接地址翻译)必须为 1 的原因:复位撤销时 MMU/TLB 尚未初始化,取指必须走直接映射,否则第一条指令都取不到(复位后 PC = 0x1C000000,物理地址也是它,前提就是直接映射)。
+
+**证据:**
+- 龙芯架构32位手册 P57 6.3复位 CRMD 复位值 PLV=0/IE=0/DA=1/PG=0 → 0x8
+                  p61 7.4.1当前模式信息 CRMD 相关位及名字
+- golden_trace:`1c058234 0c 00000008`(第一条 csrxchg 写回 8);n47 末尾 `1c058354 0c 00000008`(异常/ertn 全程没动 DA,DA 从复位保留到最后)
+
+**解决:** csr.v 中 crmd 复位值改 `32'h8`。
+
+```verilog
+always @(posedge clk) begin
+    if (reset) crmd <= 32'h8;   // 复位值: DA=1(直接地址映射), PLV=0, IE=0
+    ...
+```
