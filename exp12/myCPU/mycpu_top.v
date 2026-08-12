@@ -602,6 +602,16 @@ reg [1:0]  id_ex_mem_size;
 reg        id_ex_mem_sign;
 reg        id_ex_ex_syscall;   // 1 = syscall in EX stage, triggers exception
 
+// ertn jump target: ERA with forwarding from earlier CSR writes to ERA(0x6)
+//   CSR writes happen in EX stage now: only id_ex needs forwarding (older ones already written)
+assign ertn_target = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == 14'h6) ? id_ex_csr_wdata :
+                     csr_rdata2;
+
+// CSR read forwarding: csr instruction in ID reads CSR, csr write in EX targets same CSR
+//   (e.g. csrwr t0,era; csrrd t1,era -- csrrd must see the value being written this cycle)
+assign csr_rdata1_fwd = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == csr_raddr1) ? id_ex_csr_wdata :
+                        csr_rdata1;
+
 always @(posedge clk) begin
     if (reset) begin
         id_ex_valid        <= 1'b0;
@@ -888,16 +898,6 @@ assign load_data = (mem_wb_mem_size == 2'b01) ? load_byte_ext :
                                                 data_sram_rdata;
 
 assign rf_wdata = mem_wb_res_from_mem ? load_data : mem_wb_alu_result;
-
-// ertn jump target: ERA with forwarding from earlier CSR writes to ERA(0x6)
-//   CSR writes happen in EX stage now: only id_ex needs forwarding (older ones already written)
-assign ertn_target = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == 14'h6) ? id_ex_csr_wdata :
-                     csr_rdata2;
-
-// CSR read forwarding: csr instruction in ID reads CSR, csr write in EX targets same CSR
-//   (e.g. csrwr t0,era; csrrd t1,era -- csrrd must see the value being written this cycle)
-assign csr_rdata1_fwd = (id_ex_csr_we && id_ex_valid && id_ex_csr_waddr == csr_raddr1) ? id_ex_csr_wdata :
-                        csr_rdata1;
 
 // debug info generate
 assign debug_wb_pc       = mem_wb_pc;
