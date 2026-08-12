@@ -1,24 +1,19 @@
 module csr(
-    input  wire        clk,
-    input  wire        reset,
-    // READ PORT 1 (instruction, ID stage)
-    input  wire [13:0] raddr1,
-    output wire [31:0] rdata1,
-    // WRITE PORT (instruction, WB stage)
-    input  wire        we,       //write enable, HIGH valid
-    input  wire [13:0] waddr,
-    input  wire [31:0] wdata,
-    // READ PORT 2 (ertn in ID -> ERA; exception in EX -> EENTRY)
-    input  wire [13:0] raddr2,
-    output wire [31:0] rdata2,
-    // current mode output (for PRMD save on exception)
-    output wire [31:0] crmd_out,
-    // EXCEPTION WRITE PORT (EX stage, parallel write of CRMD/PRMD/ESTAT/ERA)
-    input  wire        ex_wen,
+    input  wire        clk, //时钟
+    input  wire        reset, //复位
+    input  wire [13:0] raddr1, //读地址1
+    output wire [31:0] rdata1, //读数据1
+    input  wire        we,     //写使能
+    input  wire [13:0] waddr,  //写地址
+    input  wire [31:0] wdata,  //写数据
+    input  wire [13:0] raddr2, //读地址2
+    output wire [31:0] rdata2, //读数据2
+    output wire [31:0] crmd_out, //输出CRMD寄存器的值,异常时保存旧模式到 PRMD
+    input  wire        ex_wen, //异常写使能,异常时写入CSR寄存器
     input  wire [31:0] ex_crmd_wdata,
-    input  wire [31:0] ex_prmd_wdata,
-    input  wire [31:0] ex_estat_wdata,
-    input  wire [31:0] ex_era_wdata
+    input  wire [31:0] ex_prmd_wdata,//异常写入旧模式
+    input  wire [31:0] ex_estat_wdata,//异常原因
+    input  wire [31:0] ex_era_wdata //异常写入syscall地址
 );
 reg [31:0] crmd;
 reg [31:0] prmd;
@@ -32,7 +27,8 @@ reg [31:0] save3;
 
 //WRITE: exception port has priority (architecturally a later event)
 always @(posedge clk) begin
-    if (reset) crmd <= 32'b0;
+    // 复位值: DA=1(直接地址映射), PLV=0, IE=0,详细见手册复位阶段
+    if (reset) crmd <= 32'h8;
     else if (ex_wen) crmd <= ex_crmd_wdata;
     else if (we && waddr == 14'h0) crmd <= wdata;
 end
